@@ -12,6 +12,7 @@ import { composeVideoWithVoiceover } from "../src/final-cut.js";
 import { buildInteractionEventsFromMetadataFile } from "../src/interaction-events.js";
 import {
   browserbaseSessionReplayUrl,
+  configuredBrowserbaseSessionTimeoutSeconds,
   createBrowserbaseStagehand,
 } from "../src/stagehand.js";
 import { generateScriptedVoiceoverPackage } from "../src/voiceover.js";
@@ -34,10 +35,28 @@ const steps: DemoStep[] = [
   {
     kind: "pause",
     stepId: "intro-hold",
-    seconds: 8,
+    seconds: 10,
     focus: "center",
     scale: 1,
     description: "Hold on the Director landing page for the opening narration.",
+  },
+  {
+    kind: "focus",
+    stepId: "prompt-preview",
+    instruction:
+      "focus on the main text box where a user can describe a web automation in natural language",
+    seconds: 1.3,
+    scale: 1.16,
+    description: "Zoom in on the Director prompt input before clicking it.",
+    fallbackTexts: [
+      "What can I help you automate",
+      "Describe what you want to automate",
+      "What do you want to automate",
+      "Try Director",
+      "Prompt",
+    ],
+    fallbackTargetKind: "input",
+    observeAttempts: 4,
   },
   {
     kind: "act",
@@ -57,16 +76,16 @@ const steps: DemoStep[] = [
   },
   {
     kind: "pause",
-    stepId: "prompt-hold",
-    seconds: 3.5,
+    stepId: "prompt-explain",
+    seconds: 4,
     focus: "cursor",
     scale: 1.16,
-    description: "Hold on the Director prompt input.",
+    description: "Explain the Director prompt input.",
   },
   {
     kind: "pause",
     stepId: "prompt-zoom-out",
-    seconds: 1.2,
+    seconds: 1,
     focus: "center",
     scale: 1,
     description: "Zoom back out from the prompt input.",
@@ -74,7 +93,7 @@ const steps: DemoStep[] = [
   {
     kind: "pause",
     stepId: "suggestion-setup",
-    seconds: 4.5,
+    seconds: 3.2,
     focus: "center",
     scale: 1,
     description: "Set up the truck route gas price example.",
@@ -99,60 +118,66 @@ const steps: DemoStep[] = [
   {
     kind: "pause",
     stepId: "dairy-explain",
-    seconds: 11,
+    seconds: 11.5,
     focus: "center",
     scale: 1,
     description: "Hold on the generated workflow for the customer story.",
   },
   {
     kind: "act",
+    stepId: "skip-results",
+    instruction: 'click the "Skip to results" button',
+    fallbackTexts: ["Skip to results", "Results"],
+    fallbackTargetKind: "clickable",
+    observeAttempts: 4,
+    settleMs: 1800,
+  },
+  {
+    kind: "pause",
+    stepId: "code-explain",
+    seconds: 4,
+    focus: "center",
+    scale: 1,
+    description: "Explain that the automation is captured as repeatable Stagehand code.",
+  },
+  {
+    kind: "focus",
+    stepId: "view-code-preview",
+    instruction: 'focus on the "Code and Files" button in the top right',
+    seconds: 1.2,
+    scale: 1.16,
+    description: "Zoom in on the Code and Files button before clicking it.",
+    fallbackTexts: ["Code and Files", "Code", "Files"],
+    fallbackTargetKind: "clickable",
+    observeAttempts: 4,
+  },
+  {
+    kind: "act",
     stepId: "view-code",
-    instruction: 'click the "View Code" button',
-    fallbackTexts: ["View Code"],
+    instruction: 'click the "Code and Files" button in the top right',
+    fallbackTexts: ["Code and Files", "Code", "Files"],
     fallbackTargetKind: "clickable",
     observeAttempts: 4,
     settleMs: 1500,
   },
   {
     kind: "pause",
-    stepId: "view-code-hold",
-    seconds: 1.1,
-    focus: "cursor",
+    stepId: "deploy-explain",
+    seconds: 3.1,
+    focus: "center",
+    scale: 1,
+    description: "Explain that the automation can be deployed to Browserbase.",
+  },
+  {
+    kind: "focus",
+    stepId: "run-browserbase-preview",
+    instruction: 'focus on the "Run on Browserbase" button',
+    seconds: 1.2,
     scale: 1.16,
-    description: "Hold on the View Code affordance.",
-  },
-  {
-    kind: "pause",
-    stepId: "view-code-zoom-out",
-    seconds: 1,
-    focus: "center",
-    scale: 1,
-    description: "Zoom back out after opening the code view.",
-  },
-  {
-    kind: "pause",
-    stepId: "code-explain",
-    seconds: 3.4,
-    focus: "center",
-    scale: 1,
-    description: "Explain the generated Stagehand code sheet.",
-  },
-  {
-    kind: "act",
-    stepId: "copy-code",
-    instruction: 'click the "Copy" button in the code side sheet',
-    fallbackTexts: ["Copy", "Copy code"],
+    description: "Zoom in on the Run on Browserbase button before clicking it.",
+    fallbackTexts: ["Run on Browserbase"],
     fallbackTargetKind: "clickable",
     observeAttempts: 4,
-    settleMs: 1200,
-  },
-  {
-    kind: "pause",
-    stepId: "copy-explain",
-    seconds: 2.8,
-    focus: "center",
-    scale: 1,
-    description: "Explain that the code can be copied and run locally.",
   },
   {
     kind: "act",
@@ -165,16 +190,8 @@ const steps: DemoStep[] = [
   },
   {
     kind: "pause",
-    stepId: "run-explain",
-    seconds: 3,
-    focus: "cursor",
-    scale: 1.14,
-    description: "Hold on the Run on Browserbase button.",
-  },
-  {
-    kind: "pause",
     stepId: "closing-hold",
-    seconds: 5,
+    seconds: 6,
     focus: "center",
     scale: 1,
     description: "Hold for the closing narration.",
@@ -185,38 +202,35 @@ const scriptedNarration = [
   {
     stepId: "intro-hold",
     script:
-      "Today at Browserbase, we're introducing Director, which lets anyone automate the web using a natural language prompt. You can now generate repeatable web automation code in one single step.",
+      "Hey everyone, I'm Conner an Account executive at Browserbase. Today we're introducing Director, which lets anyone automate the web using a natural language prompt. You can now generate repeatable web automation code in one single step.",
   },
   {
-    stepId: "prompt-hold",
+    stepId: "prompt-explain",
     script:
-      "You can explain your browser automation in natural language.",
+      "With Director you can explain your browser automation in natural language.",
   },
   {
     stepId: "suggestion-setup",
     script:
-      "Today let's use one of our suggestions to get the average gas prices along a truck route.",
+      "Today get the average gas prices along a truck route.",
   },
   {
     stepId: "dairy-explain",
     script:
-      "We have a customer who runs a dairy company who had to manually look through gas prices for all their dairy truck routes. With Director they can use Google Maps to look up the gas stations on their route and the gas prices, saving them hours.",
+      "We have a customer who runs a dairy company who had to manually look through gas prices for all their dairy trucks routes. With Director they can use Google Maps to look up the gas stations on their route and the gas prices saving them hours.",
   },
   {
     stepId: "code-explain",
-    script: "We can view all the generated Stagehand code.",
+    script: "This entire automation is captured in repeatable Stagehand code.",
   },
   {
-    stepId: "copy-explain",
-    script: "It can be copied and run locally.",
-  },
-  {
-    stepId: "run-explain",
-    script: "Or deployed to Browserbase in one click.",
+    stepId: "deploy-explain",
+    script: "Which can be deployed to Browserbase in one click.",
   },
   {
     stepId: "closing-hold",
-    script: "I can't wait to see what you guys build with Director.",
+    script:
+      "I can't wait to see what you guys build with Director. Back to you Loren and Young.",
   },
 ] as const;
 
@@ -232,8 +246,12 @@ function cueStartMs(metadataPath: string, stepId: string) {
 
 async function main() {
   console.log("Initializing Stagehand with Browserbase...");
+  console.log(
+    `Configured Browserbase session timeout: ${configuredBrowserbaseSessionTimeoutSeconds()} seconds`,
+  );
 
   const stagehand = createBrowserbaseStagehand();
+  let stagehandClosed = false;
   await stagehand.init();
   console.log("Session ID:", stagehand.browserbaseSessionId);
 
@@ -243,11 +261,21 @@ async function main() {
   }
 
   try {
+    console.log("Running Director demo steps and rendering the polished video...");
     const artifacts = await runStagehandDemo(stagehand, steps, {
       outputDir: OUTPUT_DIR,
-      rawCaptureFps: 30,
-      outputFps: 30,
+      rawCaptureFps: 18,
+      outputFps: 18,
       fastForwardMultiplier: 4,
+      beforeRender: async () => {
+        if (!stagehandClosed) {
+          console.log(
+            "Closing the Browserbase session before starting local rendering...",
+          );
+          await stagehand.close().catch(() => undefined);
+          stagehandClosed = true;
+        }
+      },
     });
 
     console.log(`Video saved to ${artifacts.outputVideoPath}`);
@@ -264,6 +292,7 @@ async function main() {
       `Saved ${interactionEvents.length} interaction event(s) to ${INTERACTIONS_FILE}`,
     );
 
+    console.log("Generating scripted voiceover audio...");
     const ai = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
     });
@@ -287,6 +316,7 @@ async function main() {
       `Saved ${manifest.segmentCount} scripted voiceover segment(s) to ${VOICEOVER_DIR}`,
     );
 
+    console.log("Composing the final narrated MP4...");
     composeVideoWithVoiceover({
       outputPath: FINAL_VIDEO_PATH,
       videoPath: artifacts.outputVideoPath,
@@ -295,8 +325,10 @@ async function main() {
     });
     console.log(`Final narrated demo saved to ${FINAL_VIDEO_PATH}`);
   } finally {
-    console.log("Closing browser...");
-    await stagehand.close().catch(() => undefined);
+    if (!stagehandClosed) {
+      console.log("Closing browser...");
+      await stagehand.close().catch(() => undefined);
+    }
   }
 }
 

@@ -135,8 +135,8 @@ async function main() {
   try {
     const artifacts = await runStagehandDemo(stagehand, steps, {
       outputDir: OUTPUT_DIR,
-      rawCaptureFps: 30,
-      outputFps: 30,
+      rawCaptureFps: 10,
+      outputFps: 10,
       fastForwardMultiplier: 6,
     });
 

@@ -8,7 +8,7 @@ import {
   type InteractionEvent,
 } from "./interaction-events.js";
 
-const DEFAULT_SCRIPT_MODEL = "gemini-2.5-flash";
+const DEFAULT_SCRIPT_MODEL = "gemini-3.1-flash-lite-preview";
 const DEFAULT_TTS_MODEL = "gemini-2.5-pro-preview-tts";
 const DEFAULT_VOICE_NAME = "Zephyr";
 const DEFAULT_SEGMENT_GAP_MS = 1500;

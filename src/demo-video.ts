@@ -2,6 +2,7 @@ import type { Action, Stagehand } from "@browserbasehq/stagehand";
 import { execSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
+import { chromium } from "playwright";
 
 type BrowserPage = any;
 
@@ -85,6 +86,18 @@ interface TargetSnapshot {
 interface ManualTargetSnapshot extends TargetSnapshot {
   label: string;
 }
+
+const CURSOR_SVG_ASSET_PATHS: Record<CursorKind, string> = {
+  default: path.resolve("svgs/default.svg"),
+  pointer: path.resolve("svgs/handpointing.svg"),
+  text: path.resolve("svgs/textcursor.svg"),
+};
+
+const CURSOR_HOTSPOTS: Record<CursorKind, Point> = {
+  default: { x: 10, y: 7 },
+  pointer: { x: 15, y: 8 },
+  text: { x: 16, y: 16 },
+};
 
 interface MoveEvent {
   kind: "pointer-move";
@@ -195,6 +208,18 @@ export interface DemoPressStep {
   settleMs?: number;
 }
 
+export interface DemoFocusStep {
+  kind: "focus";
+  stepId?: string;
+  instruction: string;
+  seconds: number;
+  description?: string;
+  scale?: number;
+  fallbackTexts?: string[];
+  fallbackTargetKind?: "clickable" | "input" | "any";
+  observeAttempts?: number;
+}
+
 export interface DemoPauseStep {
   kind: "pause";
   stepId?: string;
@@ -208,6 +233,7 @@ export type DemoStep =
   | DemoGotoStep
   | DemoActStep
   | DemoPressStep
+  | DemoFocusStep
   | DemoPauseStep;
 
 export interface DemoRunOptions {
@@ -216,6 +242,7 @@ export interface DemoRunOptions {
   rawCaptureFps?: number;
   outputFps?: number;
   fastForwardMultiplier?: number;
+  beforeRender?: () => Promise<void> | void;
 }
 
 export interface DemoArtifacts {
@@ -333,6 +360,10 @@ class DemoTimelineRecorder {
       await this.runGoto(step);
       return;
     }
+    if (step.kind === "focus") {
+      await this.runFocus(step);
+      return;
+    }
     if (step.kind === "pause") {
       await this.runPause(step);
       return;
@@ -375,48 +406,8 @@ class DemoTimelineRecorder {
       return;
     }
 
-    const action = await this.observeActionWithRetries(step);
-    if (!action) {
-      const manualTarget = step.fallbackTexts?.length
-        ? await findManualTargetByText(this.page, {
-            texts: step.fallbackTexts,
-            targetKind:
-              step.fallbackTargetKind ?? (step.text ? "input" : "clickable"),
-            viewport: this.viewport,
-          })
-        : null;
-
-      if (manualTarget) {
-        if (step.text) {
-          await this.performPointType(
-            manualTarget,
-            step.text,
-            manualTarget.label || step.instruction,
-            step.settleMs,
-            step.stepId,
-          );
-          return;
-        }
-
-        await this.performPointClick(
-          manualTarget,
-          manualTarget.label || step.instruction,
-          step.settleMs,
-          step.stepId,
-        );
-        return;
-      }
-
-      const debugSummary = await summarizeVisibleTargets(this.page).catch(
-        () => undefined
-      );
-      if (debugSummary) {
-        console.warn("No observed action or manual fallback target found.", {
-          instruction: step.instruction,
-          summary: debugSummary,
-        });
-      }
-
+    const resolved = await this.resolveTargetForStep(step);
+    if (!resolved) {
       await this.runFallbackActivity(
         step.instruction,
         this.cursorPosition,
@@ -430,10 +421,32 @@ class DemoTimelineRecorder {
       return;
     }
 
+    if (!resolved.action) {
+      if (step.text) {
+        await this.performPointType(
+          resolved.target,
+          step.text,
+          resolved.description,
+          step.settleMs,
+          step.stepId,
+        );
+        return;
+      }
+
+      await this.performPointClick(
+        resolved.target,
+        resolved.description,
+        step.settleMs,
+        step.stepId,
+      );
+      return;
+    }
+
+    const { action, target, description } = resolved;
     const method = normalizeMethod(action.method);
     if (method.includes("scroll") || method === "wait") {
       await this.runFallbackActivity(
-        action.description || step.instruction,
+        description,
         this.cursorPosition,
         "default",
         async () => {
@@ -446,21 +459,15 @@ class DemoTimelineRecorder {
     }
 
     const locator = this.page.deepLocator(action.selector);
-    const target = await getTargetSnapshot(this.page, locator, action, this.viewport);
 
-    await this.moveCursorTo(
-      target.point,
-      target.cursor,
-      action.description,
-      step.stepId,
-    );
+    await this.moveCursorTo(target.point, target.cursor, description, step.stepId);
     await wait(this.page, this.options.movementHoverHoldMs);
 
     if (method === "click" || method === "") {
       await this.performClick(
         locator,
         target,
-        action.description,
+        description,
         step.settleMs,
         step.stepId,
       );
@@ -472,7 +479,7 @@ class DemoTimelineRecorder {
         locator,
         target,
         step.text ?? action.arguments?.[0] ?? "",
-        action.description,
+        description,
         step.settleMs,
         step.stepId,
       );
@@ -491,13 +498,13 @@ class DemoTimelineRecorder {
         stepId: step.stepId,
         position: target.point,
         cursor: target.cursor,
-        description: action.description,
+        description,
       });
       return;
     }
 
     await this.runFallbackActivity(
-      action.description || step.instruction,
+      description,
       target.point,
       target.cursor,
       async () => {
@@ -506,6 +513,34 @@ class DemoTimelineRecorder {
       step.settleMs,
       step.stepId,
     );
+  }
+
+  private async runFocus(step: DemoFocusStep) {
+    const resolved = await this.resolveTargetForStep(step);
+    const target = resolved?.target ?? {
+      point: this.cursorPosition,
+      cursor: this.currentCursorKind,
+    };
+    const description =
+      step.description ??
+      resolved?.description ??
+      `Focus on ${step.instruction}`;
+
+    await this.moveCursorTo(target.point, target.cursor, description, step.stepId);
+    await wait(this.page, this.options.movementHoverHoldMs);
+
+    const startMs = this.capturer.now();
+    await wait(this.page, step.seconds * 1000);
+    await this.capturer.captureNow();
+    this.events.push({
+      kind: "pause",
+      startMs,
+      endMs: this.capturer.now(),
+      stepId: step.stepId,
+      focus: target.point,
+      scale: step.scale ?? 1,
+      description,
+    });
   }
 
   private async runPress(step: DemoPressStep) {
@@ -549,7 +584,7 @@ class DemoTimelineRecorder {
     });
   }
 
-  private async observeActionWithRetries(step: DemoActStep) {
+  private async observeActionWithRetries(step: DemoActStep | DemoFocusStep) {
     const attempts = Math.max(1, step.observeAttempts ?? 3);
     let lastError: unknown;
 
@@ -578,12 +613,69 @@ class DemoTimelineRecorder {
     return null;
   }
 
+  private async resolveTargetForStep(step: DemoActStep | DemoFocusStep) {
+    const action = await this.observeActionWithRetries(step);
+    if (action) {
+      const locator = this.page.deepLocator(action.selector);
+      const target = await getTargetSnapshot(
+        this.page,
+        locator,
+        action,
+        this.viewport,
+      );
+      return {
+        action,
+        target,
+        description: action.description || step.instruction,
+      };
+    }
+
+    const manualTarget = step.fallbackTexts?.length
+      ? await findManualTargetByText(this.page, {
+          texts: step.fallbackTexts,
+          targetKind:
+            step.fallbackTargetKind ??
+            ("text" in step && step.text ? "input" : "clickable"),
+          viewport: this.viewport,
+        })
+      : null;
+
+    if (manualTarget) {
+      return {
+        action: null,
+        target: manualTarget,
+        description: manualTarget.label || step.instruction,
+      };
+    }
+
+    const debugSummary = await summarizeVisibleTargets(this.page).catch(
+      () => undefined,
+    );
+    if (debugSummary) {
+      console.warn("No observed action or manual fallback target found.", {
+        instruction: step.instruction,
+        summary: debugSummary,
+      });
+    }
+
+    return null;
+  }
+
   private async moveCursorTo(
     targetPoint: Point,
     cursor: CursorKind,
     description: string,
     stepId?: string,
   ) {
+    const distance = Math.hypot(
+      targetPoint.x - this.cursorPosition.x,
+      targetPoint.y - this.cursorPosition.y,
+    );
+    if (distance < 1 && cursor === this.currentCursorKind) {
+      this.cursorPosition = targetPoint;
+      return;
+    }
+
     const durationMs = computeMovementDurationMs(this.cursorPosition, targetPoint);
     const curve = buildBezierCurve(
       this.cursorPosition,
@@ -813,6 +905,7 @@ export async function runStagehandDemo(
   if (rawFrames.length === 0) {
     throw new Error("No raw frames were captured.");
   }
+  console.log(`[demo-video] Captured ${rawFrames.length} raw frame(s).`);
 
   const events = recorder.allEvents();
   const sourceDurationMs = Math.max(
@@ -835,8 +928,12 @@ export async function runStagehandDemo(
     },
   });
 
+  if (typeof options.beforeRender === "function") {
+    console.log("[demo-video] Running pre-render cleanup...");
+    await options.beforeRender();
+  }
+
   const renderedFrameCount = await renderCompositedFrames({
-    stagehand,
     rawFrames,
     renderedFramesDir,
     viewport,
@@ -845,6 +942,9 @@ export async function runStagehandDemo(
     cameraKeyframes,
     outputFps: merged.outputFps,
   });
+  console.log(
+    `[demo-video] Rendered ${renderedFrameCount} composited frame(s).`,
+  );
 
   writeMetadata(metadataPath, {
     viewport,
@@ -856,6 +956,7 @@ export async function runStagehandDemo(
     outputDurationMs: speedSegments.at(-1)?.outputEndMs ?? 0,
   });
 
+  console.log("[demo-video] Encoding final polished video...");
   encodeVideo(renderedFramesDir, outputVideoPath, merged.outputFps);
 
   return {
@@ -869,7 +970,6 @@ export async function runStagehandDemo(
 }
 
 async function renderCompositedFrames(args: {
-  stagehand: Stagehand;
   rawFrames: RecordedFrame[];
   renderedFramesDir: string;
   viewport: Viewport;
@@ -879,7 +979,6 @@ async function renderCompositedFrames(args: {
   outputFps: number;
 }) {
   const {
-    stagehand,
     rawFrames,
     renderedFramesDir,
     viewport,
@@ -889,74 +988,139 @@ async function renderCompositedFrames(args: {
     outputFps,
   } = args;
 
-  const composerPage = await stagehand.context.newPage(buildComposerDataUrl());
-  await composerPage.setViewportSize(viewport.width, viewport.height, {
-    deviceScaleFactor: 1,
-  });
-  await wait(composerPage, 100);
+  const { composerBrowser, composerPage } = await launchLocalComposer(viewport);
 
-  const outputDurationMs = speedSegments.at(-1)?.outputEndMs ?? 0;
-  const outputFrameCount = Math.max(
-    1,
-    Math.ceil((outputDurationMs / 1000) * outputFps)
-  );
-
-  const dataUrlCache = new Map<string, string>();
-  let previousRawFramePath = "";
-
-  for (let frameIndex = 0; frameIndex < outputFrameCount; frameIndex += 1) {
-    const outputTimeMs = (frameIndex * 1000) / outputFps;
-    const sourceTimeMs = mapOutputToSourceTime(speedSegments, outputTimeMs);
-    const rawFrame = pickRawFrame(rawFrames, sourceTimeMs);
-    const cursor = sampleCursor(events, sourceTimeMs, viewport);
-    const camera = sampleCamera(
-      cameraKeyframes,
-      sourceTimeMs,
-      cursor.sourcePoint,
-      viewport
+  try {
+    const outputDurationMs = speedSegments.at(-1)?.outputEndMs ?? 0;
+    const outputFrameCount = Math.max(
+      1,
+      Math.ceil((outputDurationMs / 1000) * outputFps)
     );
-    const offset = computeCameraOffset(camera.focus, camera.scale, viewport);
-    const screenPoint = {
-      x: offset.x + cursor.sourcePoint.x * camera.scale,
-      y: offset.y + cursor.sourcePoint.y * camera.scale,
-    };
+    console.log(
+      `[demo-video] Rendering ${outputFrameCount} composited frame(s) at ${outputFps} fps...`,
+    );
 
-    const payload: RenderPayload = {
-      scale: camera.scale,
-      offsetX: offset.x,
-      offsetY: offset.y,
-      cursor: {
-        visible: cursor.visible,
-        kind: cursor.kind,
-        x: screenPoint.x,
-        y: screenPoint.y,
-      },
-      clickPulse: sampleClickPulse(events, sourceTimeMs, camera.scale, offset),
-    };
+    const dataUrlCache = new Map<string, string>();
+    let previousRawFramePath = "";
+    const renderStartedAt = Date.now();
 
-    if (rawFrame.filePath !== previousRawFramePath) {
-      payload.imageDataUrl = getImageDataUrl(rawFrame.filePath, dataUrlCache);
-      previousRawFramePath = rawFrame.filePath;
+    for (let frameIndex = 0; frameIndex < outputFrameCount; frameIndex += 1) {
+      const outputTimeMs = (frameIndex * 1000) / outputFps;
+      const sourceTimeMs = mapOutputToSourceTime(speedSegments, outputTimeMs);
+      const rawFrame = pickRawFrame(rawFrames, sourceTimeMs);
+      const cursor = sampleCursor(events, sourceTimeMs, viewport);
+      const camera = sampleCamera(
+        cameraKeyframes,
+        sourceTimeMs,
+        cursor.sourcePoint,
+        viewport
+      );
+      const offset = computeCameraOffset(camera.focus, camera.scale, viewport);
+      const screenPoint = {
+        x: offset.x + cursor.sourcePoint.x * camera.scale,
+        y: offset.y + cursor.sourcePoint.y * camera.scale,
+      };
+
+      const payload: RenderPayload = {
+        scale: camera.scale,
+        offsetX: offset.x,
+        offsetY: offset.y,
+        cursor: {
+          visible: cursor.visible,
+          kind: cursor.kind,
+          x: screenPoint.x,
+          y: screenPoint.y,
+        },
+        clickPulse: sampleClickPulse(events, sourceTimeMs, camera.scale, offset),
+      };
+
+      if (rawFrame.filePath !== previousRawFramePath) {
+        payload.imageDataUrl = getImageDataUrl(rawFrame.filePath, dataUrlCache);
+        previousRawFramePath = rawFrame.filePath;
+      }
+
+      await composerPage.evaluate(async (state: RenderPayload) => {
+        const render = (window as any).__renderFrame;
+        await render(state);
+      }, payload);
+
+      const screenshot = await composerPage.screenshot({
+        scale: "css",
+        type: "png",
+      });
+      const outputFramePath = path.join(
+        renderedFramesDir,
+        `frame_${String(frameIndex).padStart(5, "0")}.png`
+      );
+      fs.writeFileSync(outputFramePath, screenshot);
+
+      if (
+        frameIndex === 0 ||
+        frameIndex === outputFrameCount - 1 ||
+        (frameIndex + 1) % 120 === 0
+      ) {
+        const elapsedSeconds = Math.max(1, (Date.now() - renderStartedAt) / 1000);
+        const framesDone = frameIndex + 1;
+        const framesPerSecond = framesDone / elapsedSeconds;
+        const remainingSeconds = Math.max(
+          0,
+          (outputFrameCount - framesDone) / Math.max(framesPerSecond, 0.01),
+        );
+        console.log(
+          `[demo-video] Render progress: ${framesDone}/${outputFrameCount} (${framesPerSecond.toFixed(2)} fps, eta ${remainingSeconds.toFixed(0)}s)`,
+        );
+      }
     }
 
-    await composerPage.evaluate(async (state: RenderPayload) => {
-      const render = (window as any).__renderFrame;
-      await render(state);
-    }, payload);
+    return outputFrameCount;
+  } finally {
+    await composerPage.close().catch(() => undefined);
+    await composerBrowser.close().catch(() => undefined);
+  }
+}
 
-    const screenshot = await composerPage.screenshot({
-      scale: "css",
-      type: "png",
-    });
-    const outputFramePath = path.join(
-      renderedFramesDir,
-      `frame_${String(frameIndex).padStart(5, "0")}.png`
+async function launchLocalComposer(viewport: Viewport) {
+  const executablePath =
+    process.env.LOCAL_CHROME_PATH ||
+    process.env.GOOGLE_CHROME_BIN ||
+    "/usr/bin/google-chrome-stable";
+
+  if (!fs.existsSync(executablePath)) {
+    throw new Error(
+      `Local Chrome executable not found at ${executablePath}. Set LOCAL_CHROME_PATH or GOOGLE_CHROME_BIN.`,
     );
-    fs.writeFileSync(outputFramePath, screenshot);
   }
 
-  await composerPage.close().catch(() => undefined);
-  return outputFrameCount;
+  console.log(
+    `[demo-video] Launching local compositor with ${executablePath}...`,
+  );
+
+  const composerBrowser = await chromium.launch({
+    executablePath,
+    headless: true,
+    args: [
+      "--disable-breakpad",
+      "--disable-crash-reporter",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--hide-scrollbars",
+      "--mute-audio",
+    ],
+  });
+  const composerPage = await composerBrowser.newPage({
+    viewport: {
+      width: viewport.width,
+      height: viewport.height,
+    },
+    deviceScaleFactor: 1,
+  });
+  await composerPage.goto(buildComposerDataUrl());
+  await composerPage.waitForTimeout(100);
+
+  return {
+    composerBrowser,
+    composerPage,
+  };
 }
 
 function buildSpeedSegments(args: {
@@ -1819,12 +1983,12 @@ function inferCursorKind(
   return "default";
 }
 
-function pickBestAction(actions: Action[], step: DemoActStep) {
+function pickBestAction(actions: Action[], step: DemoActStep | DemoFocusStep) {
   if (!actions.length) {
     return null;
   }
 
-  if (step.text) {
+  if ("text" in step && step.text) {
     return (
       actions.find((action) => {
         const method = normalizeMethod(action.method);
