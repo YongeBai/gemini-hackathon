@@ -44,17 +44,10 @@ User Prompt
           ▼
 ┌─────────────────────────┐
 │  4. COMPOSE (FFmpeg)    │  Combine everything:
-│     - Video + captions  │  - Browser recording
-│     - Trim/transitions  │  - Burned-in captions
+│     - Video             │  - Browser recording
+│     - Edits             │  - Zooms, fast forwards
 │     - Final render      │  Output: MP4 file
 └─────────┬───────────────┘
-          │
-          ▼
-┌─────────────────────────┐
-│  5. MUSIC (Lyria)       │  Stretch: generate background beat
-│     - No public API yet │  May need alternative approach
-│     - Lo-fi/upbeat vibe │  (or use a royalty-free track)
-└─────────────────────────┘
 ```
 
 ## Implementation Steps
@@ -75,8 +68,9 @@ User Prompt
 - Output: array of `{ timestamp, caption_text }`
 
 ### Step 4: FFmpeg composition
-- Burn captions into video (ASS/SRT subtitles or drawtext filter)
-- Trim dead time, add fade in/out
+- Camera movements that follow the mouse
+- Tasteful Zooms in and out
+- fast forwards when there are long periods of no mouse/keyboard events
 - Output: final `.mp4`
 
 ### Step 5 (Stretch): ChromaDB for template reuse
