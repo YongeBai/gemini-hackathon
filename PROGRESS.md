@@ -1,49 +1,66 @@
-# DemoForge — Step 1 Progress
+# DemoForge — Progress Tracker
 
-## Goal
-Navigate to a website, click a button using AI, record the session as .webm video.
+## Step 1: Stagehand + screen recording ✅ COMPLETE
 
-## Status: COMPLETE
+**What was built:** `scripts/test-stagehand.ts`
+- Connects to Browserbase cloud browser via Stagehand
+- Navigates site, clicks elements via `act()` with natural language
+- Captures ~5fps screenshots → ffmpeg stitches into `output/demo.webm`
 
-### What was built
-- `scripts/test-stagehand.ts` — Stagehand + Browserbase script that:
-  1. Connects to Browserbase cloud browser via Stagehand
-  2. Navigates to github.com/browserbase/stagehand
-  3. Uses `act("click the green Code button")` — AI finds and clicks the button
-  4. Uses `act("click the Star button")` — AI finds and clicks Star
-  5. Captures 158 frames via periodic screenshots (~5 fps)
-  6. Stitches frames into `output/demo.webm` via ffmpeg (0.46 MB)
+**Key findings:**
+- Stagehand v3 uses CDP, NOT Playwright — `recordVideo` unavailable
+- Working approach: periodic `page.screenshot()` + ffmpeg
+- Stagehand model format: `google/gemini-X` prefix required
 
-### Steps Completed
-- [x] Get API keys from user
-- [x] Create `.env` with keys (BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, GEMINI_API_KEY)
-- [x] Add `.env` to `.gitignore`
-- [x] Install dependencies (@browserbasehq/stagehand, dotenv, typescript, tsx)
-- [x] Read Stagehand docs for setup patterns
-- [x] Write `scripts/test-stagehand.ts`
-- [x] Run script and capture video
+---
 
-### Key Findings
-- Stagehand v3 uses its own CDP layer ("understudy"), NOT Playwright
-- `recordVideo` (Playwright feature) is NOT available in Stagehand v3
-- Browserbase `recordSession: true` captures rrweb data (DOM events), not actual .webm video
-- CDP `Page.startScreencast` is NOT available on Browserbase remote sessions
-- **Working approach**: periodic `page.screenshot()` at ~5fps → ffmpeg stitches into .webm
-- Stagehand supports Gemini models natively — use `google/gemini-2.0-flash` format
-- Model format `gemini-2.0-flash` is deprecated; must use `google/gemini-2.0-flash`
+## Step 2: Gemini API research ✅ COMPLETE
 
-### Blockers Resolved
-- **NotebookLM requires Google auth** — switched to GitHub repo page (no auth needed)
-- **Frames saved as .jpg but were PNG** — fixed to save as .png
-- **CDP screencast unavailable on Browserbase** — fell back to periodic screenshots
+**See RESEARCH.md for full details.**
 
-### Resources
-- Stagehand docs: https://docs.stagehand.dev
-- Open Operator (related project): https://github.com/browserbase/open-operator
-- Browserbase session replay: viewable at `https://www.browserbase.com/sessions/{sessionId}`
+Key takeaways:
+- SDK: `@google/genai` (NOT `@google/generative-ai` — deprecated Nov 2025)
+- JSON schema-constrained output via `responseMimeType` + `responseSchema`
+- `act()` = ONE action per call, describe by element type/label
+- Structured output NOT compatible with thinking mode
 
-### Decisions
-- Using `google/gemini-2.0-flash` as the AI model for Stagehand act()
-- Using periodic screenshots + ffmpeg for video recording
-- Switched target from NotebookLM (requires auth) to GitHub (public)
-- Screenshot interval: 200ms (~5fps) — good balance of quality vs overhead
+---
+
+## Step 3: Gemini 3.1 script generation + execution ✅ COMPLETE
+
+**What was built:**
+- `src/types.ts` — ActionStep (goto|act|wait), ActionLogEntry, DemoRequest types
+- `src/generator.ts` — Gemini 3.1 Pro generates ActionStep[] from DemoRequest
+  - Uses `@google/genai` SDK with structured JSON output (`responseMimeType` + `responseSchema`)
+  - System prompt explains Stagehand capabilities and prompting best practices
+  - Validates and converts raw Gemini output to typed ActionStep[]
+- `src/executor.ts` — Runs action plan via Stagehand + captures video
+  - Opens Browserbase browser with `google/gemini-2.5-flash`
+  - Background screenshot capture at ~15fps
+  - Executes goto/act/wait steps with error handling
+  - Saves `output/actions.json` (timestamped action log) + `output/demo.webm` (video)
+- `scripts/test-pipeline.ts` — End-to-end test
+
+**E2E test result:**
+- Input: `{ siteUrl: "https://github.com/browserbase/stagehand", demoTask: "Star the repository and then view the README file" }`
+- Gemini 3.1 Pro generated 6-step plan in ~2s
+- 5/6 steps succeeded (scroll failed because Star → GitHub login redirect, auth wall)
+- Output: `demo.webm` (0.10 MB, 30 frames) + `actions.json`
+
+**Key findings:**
+- `gemini-3.1-pro-preview` works well for plan generation with structured output
+- Stagehand `scrollTo` with `google/gemini-2.5-flash` has an internal bug: returns empty `elementId` on some pages
+- Auth walls (GitHub star requires login) cause downstream action failures — need public targets or cookie injection
+
+---
+
+## Step 4: Captions + FFmpeg post-production — QUEUED
+
+- Gemini generates timed captions from action log + key screenshots
+- FFmpeg: burn captions, zoom on click targets, transitions, fade in/out
+- Output: polished `.mp4`
+
+---
+
+## Step 5 (Stretch): ChromaDB — QUEUED
+## Step 6 (Stretch): Lyria music — QUEUED
