@@ -4,7 +4,10 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "demo": "tsx scripts/test-stagehand.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "voiceover": "tsx scripts/generate-voiceover.ts"
   },
   "repository": {
     "type": "git",

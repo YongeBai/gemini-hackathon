@@ -54,6 +54,20 @@ Key takeaways:
 
 ---
 
+## Voiceover Pass: event-driven Gemini TTS ✅ COMPLETE
+
+**What was built:**
+- `src/voiceover.ts` — converts Stagehand action results into mouse/keyboard events, groups nearby events into narration segments, asks Gemini for one short script line per segment, and renders one audio file per segment
+- `scripts/generate-voiceover.ts` — standalone CLI to regenerate voiceover assets from `output/interaction-events.json`
+- `scripts/test-stagehand.ts` — now saves `output/interaction-events.json` and automatically generates `output/voiceover/manifest.json`, `output/voiceover/transcript.txt`, and per-segment audio files after the video is encoded
+
+**Key decisions:**
+- Only mouse/keyboard activity creates narration segments; idle windows stay silent
+- Voiceover is emitted as multiple segment files instead of one continuous track so the composer can interleave or fast-forward around them later
+- Script generation and TTS are separate Gemini calls: one to write concise narration, one to synthesize audio with a chosen voice
+
+---
+
 ## Step 4: Captions + FFmpeg post-production — QUEUED
 
 - Gemini generates timed captions from action log + key screenshots
