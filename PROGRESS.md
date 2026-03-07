@@ -29,7 +29,7 @@ Key takeaways:
 ## Step 3: Gemini 3.1 script generation + execution ✅ COMPLETE
 
 **What was built:**
-- `src/types.ts` — ActionStep (goto|act|wait), ActionLogEntry, DemoRequest types
+- `src/types.ts` — ActionStep (goto|act|wait|scroll), ActionLogEntry, DemoRequest types
 - `src/generator.ts` — Gemini 3.1 Pro generates ActionStep[] from DemoRequest
   - Uses `@google/genai` SDK with structured JSON output (`responseMimeType` + `responseSchema`)
   - System prompt explains Stagehand capabilities and prompting best practices
@@ -57,9 +57,14 @@ Key takeaways:
 ## Voiceover Pass: event-driven Gemini TTS ✅ COMPLETE
 
 **What was built:**
-- `src/voiceover.ts` — converts Stagehand action results into mouse/keyboard events, groups nearby events into narration segments, asks Gemini for one short script line per segment, and renders one audio file per segment
+- `src/stagehand.ts` — shared Browserbase Stagehand setup used by both execution paths
+- `src/interaction-events.ts` — shared interaction-event normalization and metadata-to-event conversion using rendered output timing
+- `src/demo-metadata.ts` — polished demo metadata reader and raw-to-output timeline mapping
+- `src/voiceover.ts` — groups normalized interaction events into narration segments, asks Gemini for one short script line per segment, and renders one audio file per segment
+- `src/final-cut.ts` — muxes synthesized voiceover segments back into a final narrated MP4
 - `scripts/generate-voiceover.ts` — standalone CLI to regenerate voiceover assets from `output/interaction-events.json`
 - `scripts/test-stagehand.ts` — now saves `output/interaction-events.json` and automatically generates `output/voiceover/manifest.json`, `output/voiceover/transcript.txt`, and per-segment audio files after the video is encoded
+- `scripts/director-demo.ts` — scripted showcase demo for `director.ai` with explicit narration beats, pause-controlled pacing, and a final narrated cut
 
 **Key decisions:**
 - Only mouse/keyboard activity creates narration segments; idle windows stay silent

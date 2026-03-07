@@ -1,37 +1,22 @@
 import { execFileSync } from "child_process";
 import * as fs from "fs";
 import * as path from "path";
-import type { ActResult, Action } from "@browserbasehq/stagehand";
 import { GoogleGenAI, Modality } from "@google/genai";
+import {
+  normalizeInstructionSentence,
+  normalizeWhitespace,
+  type InteractionEvent,
+} from "./interaction-events.js";
 
 const DEFAULT_SCRIPT_MODEL = "gemini-2.5-flash";
 const DEFAULT_TTS_MODEL = "gemini-2.5-pro-preview-tts";
 const DEFAULT_VOICE_NAME = "Zephyr";
 const DEFAULT_SEGMENT_GAP_MS = 1500;
-const MIN_EVENT_DURATION_MS = 150;
-
-export type InteractionDevice = "mouse" | "keyboard";
-export type InteractionKind =
-  | "move"
-  | "click"
-  | "scroll"
-  | "hover"
-  | "drag"
-  | "type"
-  | "press";
-
-export interface InteractionEvent {
-  id: string;
-  device: InteractionDevice;
-  kind: InteractionKind;
-  instruction: string;
-  actionDescription: string;
-  selector?: string;
-  method?: string;
-  arguments?: string[];
-  startMs: number;
-  endMs: number;
-}
+export type {
+  InteractionDevice,
+  InteractionEvent,
+  InteractionKind,
+} from "./interaction-events.js";
 
 export interface VoiceoverSegment {
   id: string;
@@ -71,6 +56,27 @@ interface GenerateVoiceoverPackageParams {
   voiceName?: string;
 }
 
+export interface ScriptedVoiceoverSegmentInput {
+  id?: string;
+  startMs: number;
+  endMs?: number;
+  summary?: string;
+  script: string;
+  events?: InteractionEvent[];
+}
+
+interface GenerateScriptedVoiceoverPackageParams {
+  ai?: GoogleGenAI;
+  context?: string;
+  dryRun?: boolean;
+  outputDir: string;
+  scriptModel?: string;
+  segments: ScriptedVoiceoverSegmentInput[];
+  sourceVideo?: string;
+  ttsModel?: string;
+  voiceName?: string;
+}
+
 interface InlineAudioBlob {
   data: string;
   mimeType: string;
@@ -87,197 +93,6 @@ interface SegmentScriptResponse {
     script?: string;
     segmentId?: string;
   }>;
-}
-
-function clampEventWindow(startMs: number, endMs: number) {
-  const normalizedStart = Math.max(0, Math.round(startMs));
-  const normalizedEnd = Math.max(
-    normalizedStart + MIN_EVENT_DURATION_MS,
-    Math.round(endMs),
-  );
-
-  return {
-    startMs: normalizedStart,
-    endMs: normalizedEnd,
-  };
-}
-
-function normalizeWhitespace(value: string) {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function sanitizeText(value: string | undefined, fallback: string) {
-  if (!value) {
-    return fallback;
-  }
-
-  const normalized = normalizeWhitespace(value);
-  return normalized || fallback;
-}
-
-function normalizeInstructionSentence(value: string) {
-  const cleaned = normalizeWhitespace(value)
-    .replace(/^["'`]+|["'`]+$/g, "")
-    .replace(/^[\d.\-:)\]]+\s*/, "");
-
-  if (!cleaned) {
-    return "Narrate the visible interaction.";
-  }
-
-  const withPeriod = /[.!?]$/.test(cleaned) ? cleaned : `${cleaned}.`;
-  return withPeriod.charAt(0).toUpperCase() + withPeriod.slice(1);
-}
-
-function inferInteraction(action: Action | undefined, instruction: string) {
-  const haystack = normalizeWhitespace(
-    [
-      action?.method,
-      action?.description,
-      instruction,
-      ...(action?.arguments ?? []),
-    ]
-      .filter(Boolean)
-      .join(" "),
-  ).toLowerCase();
-
-  if (!haystack) {
-    return null;
-  }
-
-  if (/\b(type|fill|enter text|insert text|input)\b/.test(haystack)) {
-    return {
-      device: "keyboard" as const,
-      kind: "type" as const,
-    };
-  }
-
-  if (
-    /\b(press|hit|shortcut|hotkey|key\b|keyboard\b|tab\b|enter\b|escape\b)\b/.test(
-      haystack,
-    )
-  ) {
-    return {
-      device: "keyboard" as const,
-      kind: "press" as const,
-    };
-  }
-
-  if (/\b(scroll|wheel)\b/.test(haystack)) {
-    return {
-      device: "mouse" as const,
-      kind: "scroll" as const,
-    };
-  }
-
-  if (/\b(move|pointer-move|cursor)\b/.test(haystack)) {
-    return {
-      device: "mouse" as const,
-      kind: "move" as const,
-    };
-  }
-
-  if (/\b(hover)\b/.test(haystack)) {
-    return {
-      device: "mouse" as const,
-      kind: "hover" as const,
-    };
-  }
-
-  if (/\b(drag|drop)\b/.test(haystack)) {
-    return {
-      device: "mouse" as const,
-      kind: "drag" as const,
-    };
-  }
-
-  if (/\b(click|tap|button|select|open|toggle|check|uncheck)\b/.test(haystack)) {
-    return {
-      device: "mouse" as const,
-      kind: "click" as const,
-    };
-  }
-
-  return null;
-}
-
-function buildEventId(startMs: number, index: number) {
-  return `event-${String(startMs).padStart(6, "0")}-${String(index + 1).padStart(2, "0")}`;
-}
-
-function buildEventDescription(
-  action: Action | undefined,
-  instruction: string,
-  fallbackActionDescription?: string,
-) {
-  return sanitizeText(
-    action?.description || fallbackActionDescription,
-    normalizeInstructionSentence(instruction),
-  );
-}
-
-export function interactionEventsFromActResult(params: {
-  endedAtMs: number;
-  instruction: string;
-  result: ActResult;
-  startedAtMs: number;
-}) {
-  const { endedAtMs, instruction, result, startedAtMs } = params;
-  const actionEntries = result.actions
-    .map((action, index) => ({
-      action,
-      index,
-      interaction: inferInteraction(action, instruction),
-    }))
-    .filter((entry) => entry.interaction !== null);
-
-  const relevantEntries =
-    actionEntries.length > 0
-      ? actionEntries
-      : inferInteraction(undefined, instruction)
-        ? [
-            {
-              action: undefined,
-              index: 0,
-              interaction: inferInteraction(undefined, instruction),
-            },
-          ]
-        : [];
-
-  if (relevantEntries.length === 0) {
-    return [];
-  }
-
-  const normalizedWindow = clampEventWindow(startedAtMs, endedAtMs);
-  const durationMs = normalizedWindow.endMs - normalizedWindow.startMs;
-
-  return relevantEntries.map((entry, entryIndex) => {
-    const sliceStart =
-      normalizedWindow.startMs +
-      Math.floor((durationMs * entryIndex) / relevantEntries.length);
-    const sliceEnd =
-      entryIndex === relevantEntries.length - 1
-        ? normalizedWindow.endMs
-        : normalizedWindow.startMs +
-          Math.floor((durationMs * (entryIndex + 1)) / relevantEntries.length);
-    const eventWindow = clampEventWindow(sliceStart, sliceEnd);
-
-    return {
-      id: buildEventId(eventWindow.startMs, entry.index ?? entryIndex),
-      device: entry.interaction!.device,
-      kind: entry.interaction!.kind,
-      instruction: normalizeInstructionSentence(instruction),
-      actionDescription: buildEventDescription(
-        entry.action,
-        instruction,
-        result.actionDescription,
-      ),
-      selector: entry.action?.selector,
-      method: entry.action?.method,
-      arguments: entry.action?.arguments,
-      startMs: eventWindow.startMs,
-      endMs: eventWindow.endMs,
-    } satisfies InteractionEvent;
-  });
 }
 
 function eventSummary(event: InteractionEvent) {
@@ -720,6 +535,21 @@ function transcriptLine(segment: VoiceoverSegment) {
   return `${seconds}s  ${audioFile}  ${segment.script}`;
 }
 
+function writeVoiceoverArtifacts(
+  outputDir: string,
+  manifest: VoiceoverManifest,
+  segments: VoiceoverSegment[],
+) {
+  fs.writeFileSync(
+    path.join(outputDir, "manifest.json"),
+    JSON.stringify(manifest, null, 2),
+  );
+  fs.writeFileSync(
+    path.join(outputDir, "transcript.txt"),
+    segments.map(transcriptLine).join("\n") + (segments.length > 0 ? "\n" : ""),
+  );
+}
+
 export async function generateVoiceoverPackage(
   params: GenerateVoiceoverPackageParams,
 ) {
@@ -789,15 +619,98 @@ export async function generateVoiceoverPackage(
     segments: renderedSegments,
   };
 
-  fs.writeFileSync(
-    path.join(outputDir, "manifest.json"),
-    JSON.stringify(manifest, null, 2),
-  );
-  fs.writeFileSync(
-    path.join(outputDir, "transcript.txt"),
-    renderedSegments.map(transcriptLine).join("\n") +
-      (renderedSegments.length > 0 ? "\n" : ""),
-  );
+  writeVoiceoverArtifacts(outputDir, manifest, renderedSegments);
+
+  return {
+    manifest,
+    segments: renderedSegments,
+  };
+}
+
+export async function generateScriptedVoiceoverPackage(
+  params: GenerateScriptedVoiceoverPackageParams,
+) {
+  const {
+    ai,
+    context = "A concise screen-recorded product demo.",
+    dryRun = false,
+    outputDir,
+    scriptModel = "manual-script",
+    segments,
+    sourceVideo,
+    ttsModel = DEFAULT_TTS_MODEL,
+    voiceName = DEFAULT_VOICE_NAME,
+  } = params;
+
+  fs.mkdirSync(outputDir, { recursive: true });
+  clearPreviousVoiceoverArtifacts(outputDir);
+
+  const normalizedSegments: VoiceoverSegment[] = segments.map((segment, index) => {
+    const startMs = Math.max(0, Math.round(segment.startMs));
+    const endMs = Math.max(startMs, Math.round(segment.endMs ?? startMs));
+
+    return {
+      id: segment.id ?? `segment-${String(index + 1).padStart(3, "0")}`,
+      index,
+      startMs,
+      endMs,
+      events: segment.events ?? [],
+      summary: segment.summary ?? segment.script,
+      script: normalizeNarrationScript(segment.script, fallbackScript({
+        id: "fallback",
+        index,
+        startMs,
+        endMs,
+        events: segment.events ?? [],
+        summary: segment.summary ?? segment.script,
+        script: segment.script,
+      })),
+    };
+  });
+
+  const renderedSegments: VoiceoverSegment[] = [];
+
+  for (const segment of normalizedSegments) {
+    if (dryRun) {
+      renderedSegments.push(segment);
+      continue;
+    }
+
+    const audio = await synthesizeSegmentAudio({
+      ai: assertAiClient(ai),
+      outputDir,
+      script: segment.script,
+      segmentId: segment.id,
+      ttsModel,
+      voiceName,
+    });
+
+    renderedSegments.push({
+      ...segment,
+      ...audio,
+      endMs:
+        audio.audioDurationMs !== undefined
+          ? Math.max(segment.endMs, segment.startMs + audio.audioDurationMs)
+          : segment.endMs,
+    });
+  }
+
+  const manifest: VoiceoverManifest = {
+    generatedAt: new Date().toISOString(),
+    context,
+    voiceName,
+    scriptModel,
+    ttsModel: dryRun ? undefined : ttsModel,
+    sourceVideo,
+    eventCount: normalizedSegments.reduce(
+      (count, segment) => count + segment.events.length,
+      0,
+    ),
+    segmentCount: renderedSegments.length,
+    segments: renderedSegments,
+  };
+
+  writeVoiceoverArtifacts(outputDir, manifest, renderedSegments);
 
   return {
     manifest,

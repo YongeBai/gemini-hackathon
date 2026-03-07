@@ -1,8 +1,8 @@
 import "dotenv/config";
-import { Stagehand } from "@browserbasehq/stagehand";
 import * as fs from "fs";
 import * as path from "path";
 import { execSync } from "child_process";
+import { createBrowserbaseStagehand } from "./stagehand.js";
 import { ActionStep, ActionLogEntry } from "./types.js";
 
 const OUTPUT_DIR = path.resolve("output");
@@ -21,21 +21,7 @@ export async function executeActionPlan(
 
   console.log("[executor] Initializing Stagehand with Browserbase...");
 
-  const stagehand = new Stagehand({
-    env: "BROWSERBASE",
-    apiKey: process.env.BROWSERBASE_API_KEY,
-    projectId: process.env.BROWSERBASE_PROJECT_ID,
-    model: {
-      modelName: "google/gemini-2.5-flash",
-      apiKey: process.env.GEMINI_API_KEY,
-    },
-    browserbaseSessionCreateParams: {
-      browserSettings: {
-        recordSession: true,
-        viewport: { width: 1280, height: 720 },
-      },
-    },
-  });
+  const stagehand = createBrowserbaseStagehand();
 
   await stagehand.init();
   console.log("[executor] Session ID:", stagehand.browserbaseSessionId);

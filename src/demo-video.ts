@@ -82,10 +82,15 @@ interface TargetSnapshot {
   cursor: CursorKind;
 }
 
+interface ManualTargetSnapshot extends TargetSnapshot {
+  label: string;
+}
+
 interface MoveEvent {
   kind: "pointer-move";
   startMs: number;
   endMs: number;
+  stepId?: string;
   from: Point;
   to: Point;
   cp1: Point;
@@ -98,6 +103,7 @@ interface ClickEvent {
   kind: "click";
   startMs: number;
   endMs: number;
+  stepId?: string;
   position: Point;
   cursor: CursorKind;
   description: string;
@@ -107,6 +113,7 @@ interface TypeEvent {
   kind: "type";
   startMs: number;
   endMs: number;
+  stepId?: string;
   position: Point;
   cursor: CursorKind;
   description: string;
@@ -117,8 +124,30 @@ interface ActivityEvent {
   kind: "activity";
   startMs: number;
   endMs: number;
+  stepId?: string;
   position: Point;
   cursor: CursorKind;
+  description: string;
+}
+
+interface PressEvent {
+  kind: "press";
+  startMs: number;
+  endMs: number;
+  stepId?: string;
+  position: Point;
+  cursor: CursorKind;
+  description: string;
+  key: string;
+}
+
+interface PauseEvent {
+  kind: "pause";
+  startMs: number;
+  endMs: number;
+  stepId?: string;
+  focus: Point;
+  scale: number;
   description: string;
 }
 
@@ -126,6 +155,7 @@ interface NavigateEvent {
   kind: "navigate";
   startMs: number;
   endMs: number;
+  stepId?: string;
   url: string;
 }
 
@@ -134,10 +164,13 @@ type DemoEvent =
   | ClickEvent
   | TypeEvent
   | ActivityEvent
+  | PressEvent
+  | PauseEvent
   | NavigateEvent;
 
 export interface DemoGotoStep {
   kind: "goto";
+  stepId?: string;
   url: string;
   waitUntil?: "load" | "domcontentloaded" | "networkidle";
   settleMs?: number;
@@ -145,12 +178,37 @@ export interface DemoGotoStep {
 
 export interface DemoActStep {
   kind: "act";
+  stepId?: string;
   instruction: string;
   text?: string;
   settleMs?: number;
+  fallbackTexts?: string[];
+  fallbackTargetKind?: "clickable" | "input" | "any";
+  observeAttempts?: number;
 }
 
-export type DemoStep = DemoGotoStep | DemoActStep;
+export interface DemoPressStep {
+  kind: "press";
+  stepId?: string;
+  key: string;
+  description?: string;
+  settleMs?: number;
+}
+
+export interface DemoPauseStep {
+  kind: "pause";
+  stepId?: string;
+  seconds: number;
+  description?: string;
+  focus?: "center" | "cursor";
+  scale?: number;
+}
+
+export type DemoStep =
+  | DemoGotoStep
+  | DemoActStep
+  | DemoPressStep
+  | DemoPauseStep;
 
 export interface DemoRunOptions {
   outputDir?: string;
@@ -245,6 +303,7 @@ class DemoTimelineRecorder {
   private readonly options: typeof DEFAULT_OPTIONS;
   private readonly capturer: FrameCapturer;
   private cursorPosition: Point;
+  private currentCursorKind: CursorKind;
 
   constructor(args: {
     page: BrowserPage;
@@ -262,6 +321,7 @@ class DemoTimelineRecorder {
       x: Math.round(this.viewport.width * 0.9),
       y: Math.round(this.viewport.height * 0.88),
     };
+    this.currentCursorKind = "default";
   }
 
   allEvents() {
@@ -271,6 +331,14 @@ class DemoTimelineRecorder {
   async runStep(step: DemoStep) {
     if (step.kind === "goto") {
       await this.runGoto(step);
+      return;
+    }
+    if (step.kind === "pause") {
+      await this.runPause(step);
+      return;
+    }
+    if (step.kind === "press") {
+      await this.runPress(step);
       return;
     }
     await this.runAct(step);
@@ -287,6 +355,7 @@ class DemoTimelineRecorder {
       kind: "navigate",
       startMs,
       endMs: this.capturer.now(),
+      stepId: step.stepId,
       url: step.url,
     });
   }
@@ -300,25 +369,63 @@ class DemoTimelineRecorder {
         async () => {
           await this.stagehand.act(step.instruction, { page: this.page });
         },
-        step.settleMs
+        step.settleMs,
+        step.stepId,
       );
       return;
     }
 
-    const observed = (await this.stagehand.observe(step.instruction, {
-      page: this.page,
-    })) as Action[];
-
-    const action = pickBestAction(observed, step);
+    const action = await this.observeActionWithRetries(step);
     if (!action) {
+      const manualTarget = step.fallbackTexts?.length
+        ? await findManualTargetByText(this.page, {
+            texts: step.fallbackTexts,
+            targetKind:
+              step.fallbackTargetKind ?? (step.text ? "input" : "clickable"),
+            viewport: this.viewport,
+          })
+        : null;
+
+      if (manualTarget) {
+        if (step.text) {
+          await this.performPointType(
+            manualTarget,
+            step.text,
+            manualTarget.label || step.instruction,
+            step.settleMs,
+            step.stepId,
+          );
+          return;
+        }
+
+        await this.performPointClick(
+          manualTarget,
+          manualTarget.label || step.instruction,
+          step.settleMs,
+          step.stepId,
+        );
+        return;
+      }
+
+      const debugSummary = await summarizeVisibleTargets(this.page).catch(
+        () => undefined
+      );
+      if (debugSummary) {
+        console.warn("No observed action or manual fallback target found.", {
+          instruction: step.instruction,
+          summary: debugSummary,
+        });
+      }
+
       await this.runFallbackActivity(
         step.instruction,
         this.cursorPosition,
-        "pointer",
+        step.text ? "text" : "pointer",
         async () => {
           await this.stagehand.act(step.instruction, { page: this.page });
         },
-        step.settleMs
+        step.settleMs,
+        step.stepId,
       );
       return;
     }
@@ -332,7 +439,8 @@ class DemoTimelineRecorder {
         async () => {
           await this.stagehand.act(step.instruction, { page: this.page });
         },
-        step.settleMs
+        step.settleMs,
+        step.stepId,
       );
       return;
     }
@@ -340,11 +448,22 @@ class DemoTimelineRecorder {
     const locator = this.page.deepLocator(action.selector);
     const target = await getTargetSnapshot(this.page, locator, action, this.viewport);
 
-    await this.moveCursorTo(target.point, target.cursor, action.description);
+    await this.moveCursorTo(
+      target.point,
+      target.cursor,
+      action.description,
+      step.stepId,
+    );
     await wait(this.page, this.options.movementHoverHoldMs);
 
     if (method === "click" || method === "") {
-      await this.performClick(locator, target, action.description, step.settleMs);
+      await this.performClick(
+        locator,
+        target,
+        action.description,
+        step.settleMs,
+        step.stepId,
+      );
       return;
     }
 
@@ -354,7 +473,8 @@ class DemoTimelineRecorder {
         target,
         step.text ?? action.arguments?.[0] ?? "",
         action.description,
-        step.settleMs
+        step.settleMs,
+        step.stepId,
       );
       return;
     }
@@ -368,6 +488,7 @@ class DemoTimelineRecorder {
         kind: "activity",
         startMs: hoverStartedAt,
         endMs: this.capturer.now(),
+        stepId: step.stepId,
         position: target.point,
         cursor: target.cursor,
         description: action.description,
@@ -382,14 +503,86 @@ class DemoTimelineRecorder {
       async () => {
         await this.stagehand.act(step.instruction, { page: this.page });
       },
-      step.settleMs
+      step.settleMs,
+      step.stepId,
     );
+  }
+
+  private async runPress(step: DemoPressStep) {
+    const startMs = this.capturer.now();
+    await this.page.keyPress(step.key);
+    await wait(this.page, step.settleMs ?? this.options.actionSettleMs);
+    await this.capturer.captureNow();
+    this.events.push({
+      kind: "press",
+      startMs,
+      endMs: this.capturer.now(),
+      stepId: step.stepId,
+      position: this.cursorPosition,
+      cursor: this.currentCursorKind,
+      description: step.description ?? `Press ${step.key}`,
+      key: step.key,
+    });
+  }
+
+  private async runPause(step: DemoPauseStep) {
+    const startMs = this.capturer.now();
+    const focus =
+      step.focus === "center"
+        ? {
+            x: Math.round(this.viewport.width / 2),
+            y: Math.round(this.viewport.height / 2),
+          }
+        : { ...this.cursorPosition };
+
+    await wait(this.page, step.seconds * 1000);
+    await this.capturer.captureNow();
+    this.events.push({
+      kind: "pause",
+      startMs,
+      endMs: this.capturer.now(),
+      stepId: step.stepId,
+      focus,
+      scale: step.scale ?? 1,
+      description:
+        step.description ?? `Pause for ${step.seconds.toFixed(1)} second(s)`,
+    });
+  }
+
+  private async observeActionWithRetries(step: DemoActStep) {
+    const attempts = Math.max(1, step.observeAttempts ?? 3);
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt < attempts; attempt += 1) {
+      try {
+        const observed = (await this.stagehand.observe(step.instruction, {
+          page: this.page,
+        })) as Action[];
+        const action = pickBestAction(observed, step);
+        if (action) {
+          return action;
+        }
+      } catch (error) {
+        lastError = error;
+      }
+
+      if (attempt < attempts - 1) {
+        await wait(this.page, 1200 * (attempt + 1));
+      }
+    }
+
+    if (lastError) {
+      console.warn("observe() failed, falling back:", lastError);
+    }
+
+    return null;
   }
 
   private async moveCursorTo(
     targetPoint: Point,
     cursor: CursorKind,
-    description: string
+    description: string,
+    stepId?: string,
   ) {
     const durationMs = computeMovementDurationMs(this.cursorPosition, targetPoint);
     const curve = buildBezierCurve(
@@ -404,6 +597,7 @@ class DemoTimelineRecorder {
       kind: "pointer-move",
       startMs,
       endMs,
+      stepId,
       from: this.cursorPosition,
       to: targetPoint,
       cp1: curve.cp1,
@@ -412,13 +606,15 @@ class DemoTimelineRecorder {
       description,
     });
     this.cursorPosition = targetPoint;
+    this.currentCursorKind = cursor;
   }
 
   private async performClick(
     locator: any,
     target: TargetSnapshot,
     description: string,
-    settleMs?: number
+    settleMs?: number,
+    stepId?: string,
   ) {
     await locator.hover().catch(() => undefined);
     const clickStartedAt = this.capturer.now();
@@ -427,10 +623,12 @@ class DemoTimelineRecorder {
       kind: "click",
       startMs: clickStartedAt,
       endMs: clickStartedAt + 220,
+      stepId,
       position: target.point,
       cursor: target.cursor,
       description,
     });
+    this.currentCursorKind = target.cursor;
     await wait(this.page, settleMs ?? this.options.actionSettleMs);
     await this.capturer.captureNow();
   }
@@ -440,7 +638,8 @@ class DemoTimelineRecorder {
     target: TargetSnapshot,
     text: string,
     description: string,
-    settleMs?: number
+    settleMs?: number,
+    stepId?: string,
   ) {
     await locator.click();
     const clickStartedAt = this.capturer.now();
@@ -448,6 +647,7 @@ class DemoTimelineRecorder {
       kind: "click",
       startMs: clickStartedAt,
       endMs: clickStartedAt + 220,
+      stepId,
       position: target.point,
       cursor: "text",
       description,
@@ -462,11 +662,79 @@ class DemoTimelineRecorder {
       kind: "type",
       startMs: typeStartedAt,
       endMs: this.capturer.now(),
+      stepId,
       position: target.point,
       cursor: "text",
       description,
       textLength: text.length,
     });
+    this.currentCursorKind = "text";
+    await wait(this.page, settleMs ?? this.options.actionSettleMs);
+    await this.capturer.captureNow();
+  }
+
+  private async performPointClick(
+    target: TargetSnapshot,
+    description: string,
+    settleMs?: number,
+    stepId?: string,
+  ) {
+    await this.moveCursorTo(target.point, target.cursor, description, stepId);
+    await wait(this.page, this.options.movementHoverHoldMs);
+    await this.page.hover(target.point.x, target.point.y).catch(() => undefined);
+    const clickStartedAt = this.capturer.now();
+    await this.page.click(target.point.x, target.point.y);
+    this.events.push({
+      kind: "click",
+      startMs: clickStartedAt,
+      endMs: clickStartedAt + 220,
+      stepId,
+      position: target.point,
+      cursor: target.cursor,
+      description,
+    });
+    this.currentCursorKind = target.cursor;
+    await wait(this.page, settleMs ?? this.options.actionSettleMs);
+    await this.capturer.captureNow();
+  }
+
+  private async performPointType(
+    target: TargetSnapshot,
+    text: string,
+    description: string,
+    settleMs?: number,
+    stepId?: string,
+  ) {
+    await this.moveCursorTo(target.point, target.cursor, description, stepId);
+    await wait(this.page, this.options.movementHoverHoldMs);
+    await this.page.click(target.point.x, target.point.y);
+    const clickStartedAt = this.capturer.now();
+    this.events.push({
+      kind: "click",
+      startMs: clickStartedAt,
+      endMs: clickStartedAt + 220,
+      stepId,
+      position: target.point,
+      cursor: "text",
+      description,
+    });
+
+    await this.page.keyPress("Ctrl+A").catch(() => undefined);
+    await this.page.keyPress("Backspace").catch(() => undefined);
+
+    const typeStartedAt = this.capturer.now();
+    await this.page.type(text, { delay: 70 });
+    this.events.push({
+      kind: "type",
+      startMs: typeStartedAt,
+      endMs: this.capturer.now(),
+      stepId,
+      position: target.point,
+      cursor: "text",
+      description,
+      textLength: text.length,
+    });
+    this.currentCursorKind = "text";
     await wait(this.page, settleMs ?? this.options.actionSettleMs);
     await this.capturer.captureNow();
   }
@@ -476,7 +744,8 @@ class DemoTimelineRecorder {
     position: Point,
     cursor: CursorKind,
     run: () => Promise<void>,
-    settleMs?: number
+    settleMs?: number,
+    stepId?: string,
   ) {
     const startMs = this.capturer.now();
     await run();
@@ -486,10 +755,12 @@ class DemoTimelineRecorder {
       kind: "activity",
       startMs,
       endMs: this.capturer.now(),
+      stepId,
       position,
       cursor,
       description,
     });
+    this.currentCursorKind = cursor;
   }
 }
 
@@ -802,9 +1073,15 @@ function buildCameraKeyframes(args: {
       continue;
     }
 
-    if (event.kind === "activity") {
+    if (event.kind === "activity" || event.kind === "press") {
       pushKeyframe(event.startMs, event.position, 1.05);
       pushKeyframe(event.endMs + 450, event.position, 1.0);
+      continue;
+    }
+
+    if (event.kind === "pause") {
+      pushKeyframe(event.startMs, event.focus, event.scale);
+      pushKeyframe(event.endMs, event.focus, event.scale);
     }
   }
 
@@ -892,7 +1169,12 @@ function sampleCursor(
       continue;
     }
 
-    if (event.kind === "click" || event.kind === "type" || event.kind === "activity") {
+    if (
+      event.kind === "click" ||
+      event.kind === "type" ||
+      event.kind === "activity" ||
+      event.kind === "press"
+    ) {
       if (sourceTimeMs >= event.startMs) {
         sourcePoint = event.position;
         kind = event.cursor;
@@ -1204,6 +1486,288 @@ async function getTargetSnapshot(
       cursor: inferCursorKind(action, null),
     };
   }
+}
+
+async function findManualTargetByText(
+  page: BrowserPage,
+  args: {
+    texts: string[];
+    targetKind: "clickable" | "input" | "any";
+    viewport: Viewport;
+  }
+): Promise<ManualTargetSnapshot | null> {
+  const result = await page.evaluate(
+    ({
+      texts,
+      targetKind,
+    }: {
+      texts: string[];
+      targetKind: "clickable" | "input" | "any";
+    }) => {
+      const textNeedles = texts
+        .map((text) => text.trim().toLowerCase())
+        .filter(Boolean);
+
+      const visible = (element: Element) => {
+        if (!(element instanceof HTMLElement)) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        if (rect.width < 6 || rect.height < 6) {
+          return false;
+        }
+        const style = window.getComputedStyle(element);
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0"
+        );
+      };
+
+      const clickable = (element: Element) => {
+        const html = element as HTMLElement;
+        const role = (element.getAttribute("role") ?? "").toLowerCase();
+        const tag = element.tagName.toLowerCase();
+        const cursor = window.getComputedStyle(html).cursor;
+        return (
+          tag === "button" ||
+          tag === "a" ||
+          tag === "summary" ||
+          tag === "label" ||
+          tag === "option" ||
+          role === "button" ||
+          role === "link" ||
+          role === "tab" ||
+          role === "option" ||
+          role === "menuitem" ||
+          tag === "input" ||
+          cursor === "pointer" ||
+          html.onclick !== null ||
+          html.tabIndex >= 0
+        );
+      };
+
+      const editable = (element: Element) => {
+        const role = (element.getAttribute("role") ?? "").toLowerCase();
+        const tag = element.tagName.toLowerCase();
+        return (
+          element instanceof HTMLInputElement ||
+          element instanceof HTMLTextAreaElement ||
+          (element as HTMLElement).isContentEditable ||
+          role === "textbox" ||
+          role === "searchbox" ||
+          role === "combobox"
+        );
+      };
+
+      const collectText = (element: Element) => {
+        const html = element as HTMLElement;
+        const values = [
+          html.innerText,
+          html.getAttribute("aria-label"),
+          html.getAttribute("placeholder"),
+          html.getAttribute("title"),
+          html.getAttribute("data-testid"),
+          html.getAttribute("data-test-id"),
+          html.getAttribute("name"),
+          html.getAttribute("value"),
+          element instanceof HTMLInputElement ? element.value : "",
+        ]
+          .filter(Boolean)
+          .map((value) => String(value).trim())
+          .filter(Boolean);
+
+        return Array.from(new Set(values));
+      };
+
+      const matchScore = (values: string[]) => {
+        let score = 0;
+        let label = "";
+
+        for (const value of values) {
+          const normalized = value.toLowerCase();
+          for (const needle of textNeedles) {
+            if (normalized === needle) {
+              return {
+                score: 1000 + needle.length,
+                label: value,
+              };
+            }
+            if (normalized.startsWith(needle)) {
+              score = Math.max(score, 800 + needle.length);
+              label ||= value;
+            } else if (normalized.includes(needle)) {
+              score = Math.max(score, 600 + needle.length);
+              label ||= value;
+            } else if (needle.includes(normalized) && normalized.length >= 4) {
+              score = Math.max(score, 400 + normalized.length);
+              label ||= value;
+            }
+          }
+        }
+
+        return {
+          score,
+          label,
+        };
+      };
+
+      const roots: Array<Document | ShadowRoot> = [document];
+      const seen = new Set<Element>();
+      let best:
+        | {
+            score: number;
+            x: number;
+            y: number;
+            cursor: CursorKind;
+            label: string;
+          }
+        | null = null;
+
+      while (roots.length > 0) {
+        const root = roots.pop();
+        if (!root) {
+          continue;
+        }
+
+        const elements = Array.from(root.querySelectorAll("*"));
+        for (const element of elements) {
+          if (seen.has(element) || !visible(element)) {
+            continue;
+          }
+          seen.add(element);
+
+          const html = element as HTMLElement;
+          if (html.shadowRoot) {
+            roots.push(html.shadowRoot);
+          }
+
+          if (targetKind === "clickable" && !clickable(element)) {
+            continue;
+          }
+          if (targetKind === "input" && !editable(element)) {
+            continue;
+          }
+
+          const values = collectText(element);
+          const matched = matchScore(values);
+          if (matched.score <= 0) {
+            continue;
+          }
+
+          const rect = html.getBoundingClientRect();
+          const cursor: CursorKind =
+            editable(element)
+              ? "text"
+              : clickable(element)
+                ? "pointer"
+                : "default";
+          const score =
+            matched.score +
+            Math.min(120, Math.round(rect.width + rect.height));
+
+          if (!best || score > best.score) {
+            best = {
+              score,
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+              cursor,
+              label: matched.label || values[0] || "",
+            };
+          }
+        }
+      }
+
+      return best;
+    },
+    {
+      texts: args.texts,
+      targetKind: args.targetKind,
+    }
+  );
+
+  if (!result) {
+    return null;
+  }
+
+  return {
+    point: clampPointToViewport(
+      {
+        x: Math.round(result.x),
+        y: Math.round(result.y),
+      },
+      args.viewport
+    ),
+    cursor: result.cursor,
+    label: result.label,
+  };
+}
+
+async function summarizeVisibleTargets(page: BrowserPage) {
+  return page.evaluate(() => {
+    const visible = (element: Element) => {
+      if (!(element instanceof HTMLElement)) {
+        return false;
+      }
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 6 || rect.height < 6) {
+        return false;
+      }
+      const style = window.getComputedStyle(element);
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.opacity !== "0"
+      );
+    };
+
+    const roots: Array<Document | ShadowRoot> = [document];
+    const seen = new Set<Element>();
+    const labels: string[] = [];
+
+    while (roots.length > 0 && labels.length < 20) {
+      const root = roots.pop();
+      if (!root) {
+        continue;
+      }
+
+      for (const element of Array.from(root.querySelectorAll("*"))) {
+        if (seen.has(element) || !visible(element)) {
+          continue;
+        }
+        seen.add(element);
+
+        const html = element as HTMLElement;
+        if (html.shadowRoot) {
+          roots.push(html.shadowRoot);
+        }
+
+        const label = [
+          html.innerText,
+          html.getAttribute("aria-label"),
+          html.getAttribute("placeholder"),
+          html.getAttribute("title"),
+        ]
+          .filter(Boolean)
+          .map((value) => String(value).trim())
+          .find(Boolean);
+
+        if (!label) {
+          continue;
+        }
+
+        labels.push(label.slice(0, 120));
+        if (labels.length >= 20) {
+          break;
+        }
+      }
+    }
+
+    return {
+      url: window.location.href,
+      labels,
+    };
+  });
 }
 
 function inferCursorKind(
