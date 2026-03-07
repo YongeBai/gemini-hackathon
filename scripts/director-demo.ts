@@ -131,6 +131,7 @@ const steps: DemoStep[] = [
     fallbackTargetKind: "clickable",
     observeAttempts: 4,
     settleMs: 1800,
+    optional: true,
   },
   {
     kind: "pause",
